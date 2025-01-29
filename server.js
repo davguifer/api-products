@@ -6,12 +6,17 @@ const cors = require("cors");
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-mongoose.connect(process.env.MONGO_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
-  .then(() => console.log("Conectado a MongoDB"))
-  .catch(err => console.error("Error al conectar a MongoDB:", err));
+if (!process.env.MONGO_URI) {
+  console.error("❌ ERROR: La variable de entorno MONGO_URI no está definida.");
+  process.exit(1); 
+}
+
+mongoose.connect(process.env.MONGO_URI)
+  .then(() => console.log("✅ Conectado a MongoDB"))
+  .catch(err => {
+    console.error("❌ Error al conectar a MongoDB:", err);
+    process.exit(1); 
+  });
 
 const FoodSchema = new mongoose.Schema({
   _id: String,
@@ -42,7 +47,7 @@ app.get("/foods", async (req, res) => {
 
     const foods = await Food.find({ 
       product_name: { $regex: name, $options: "i" } 
-    });
+    }); 
 
     if (foods.length === 0) {
       return res.status(404).json({ message: "No se encontraron alimentos con ese nombre" });
@@ -50,11 +55,11 @@ app.get("/foods", async (req, res) => {
 
     res.json(foods);
   } catch (error) {
-    console.error("Error al buscar alimentos:", error);
+    console.error("❌ Error al buscar alimentos:", error);
     res.status(500).json({ error: "Error interno del servidor" });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`Servidor corriendo en el puerto ${PORT}`);
+  console.log(`🚀 Servidor corriendo en el puerto ${PORT}`);
 });
