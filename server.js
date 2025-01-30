@@ -8,14 +8,14 @@ const PORT = process.env.PORT || 5000;
 
 if (!process.env.MONGO_URI) {
   console.error("❌ ERROR: La variable de entorno MONGO_URI no está definida.");
-  process.exit(1); 
+  process.exit(1);
 }
 
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log("✅ Conectado a MongoDB"))
   .catch(err => {
     console.error("❌ Error al conectar a MongoDB:", err);
-    process.exit(1); 
+    process.exit(1);
   });
 
 const FoodSchema = new mongoose.Schema({
@@ -31,29 +31,46 @@ const FoodSchema = new mongoose.Schema({
   },
 });
 
+FoodSchema.index({ product_name: "text" });
+
 const Food = mongoose.model("Food", FoodSchema, "foods");
 
 // Middlewares
 app.use(cors());
 app.use(express.json());
 
-// Find foods by product name
 app.get("/foods", async (req, res) => {
   try {
-    const { name } = req.query;
+    const { name, page = 1, limit = 10 } = req.query;
+
     if (!name) {
       return res.status(400).json({ error: "Debes proporcionar un nombre de producto" });
     }
 
-    const foods = await Food.find({ 
-      product_name: { $regex: name, $options: "i" } 
-    }); 
+    const options = {
+      skip: (page - 1) * limit,
+      limit: parseInt(limit),
+      sort: { product_name: 1 }, 
+    };
+
+    const foods = await Food.find(
+      { product_name: { $regex: name, $options: "i" } },
+      { product_name: 1, nutriments: 1 }  
+    )
+    .skip(options.skip)
+    .limit(options.limit)
+    .sort(options.sort);
 
     if (foods.length === 0) {
       return res.status(404).json({ message: "No se encontraron alimentos con ese nombre" });
     }
 
-    res.json(foods);
+    res.json({
+      page: parseInt(page),
+      limit: parseInt(limit),
+      total: foods.length,
+      results: foods,
+    });
   } catch (error) {
     console.error("❌ Error al buscar alimentos:", error);
     res.status(500).json({ error: "Error interno del servidor" });
