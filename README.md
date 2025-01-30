@@ -25,7 +25,6 @@ source venv/bin/activate
 
 ### Instalar dependencias
 ```sh
-npm init -y
 npm install express mongoose dotenv cors
 ```
 
