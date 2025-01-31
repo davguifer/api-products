@@ -40,6 +40,8 @@ const Food = mongoose.model("Food", FoodSchema, "foods");
 app.use(cors());
 app.use(express.json());
 
+
+
 app.get("/foods", async (req, res) => {
   try {
     const { name, page = 1, limit = 10 } = req.query;
@@ -78,12 +80,24 @@ app.get("/foods", async (req, res) => {
 
     console.log("📦 Resultados devueltos:", foods.length);
 
+    // Transformation of data: convert energy to kcal
+    const transformedFoods = foods.map(food => {
+      const nutriments = { ...food.nutriments };
+      if (nutriments.energy_100g) {
+        nutriments.energy_100g = (nutriments.energy_100g / 4.184).toFixed(2);  
+      }
+      return {
+        ...food.toObject(),
+        nutriments,
+      };
+    });
+
     const response = {
       page: pageNumber,
       limit: pageLimit,
       totalResults,
       totalPages,
-      results: foods,
+      results: transformedFoods,
     };
 
     console.log("🔄 Respuesta enviada al cliente:", response);
@@ -94,6 +108,7 @@ app.get("/foods", async (req, res) => {
     res.status(500).json({ error: "Error interno del servidor" });
   }
 });
+
 
 app.listen(PORT, HOST, () => {
   console.log(`🚀 Servidor corriendo en http://${HOST}:${PORT}`);
