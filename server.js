@@ -13,7 +13,6 @@ const cache = new NodeCache({ stdTTL: 3600, checkperiod: 120 });
 // Número de núcleos del procesador
 const numCPUs = os.cpus().length;
 
-// Configurar clúster para múltiples hilos
 if (cluster.isMaster) {
   console.log(`🔧 Servidor principal ejecutándose en PID: ${process.pid}`);
   for (let i = 0; i < numCPUs; i++) {
@@ -25,7 +24,6 @@ if (cluster.isMaster) {
     cluster.fork();
   });
 } else {
-  // Código del servidor worker
   const app = express();
   const PORT = process.env.PORT || 5000;
   const HOST = process.env.HOST || "localhost";
@@ -36,7 +34,7 @@ if (cluster.isMaster) {
   }
 
   mongoose.connect(process.env.MONGO_URI, {
-    maxPoolSize: 50, // Incrementar el tamaño del pool para mejorar concurrencia
+    maxPoolSize: 50,
   })
     .then(() => console.log("✅ Conectado a MongoDB"))
     .catch(err => {
@@ -57,60 +55,84 @@ if (cluster.isMaster) {
     },
   });
 
-  FoodSchema.index({ product_name: 1, _id: 1 });  // Índice compuesto para mejorar búsquedas y paginación
+  FoodSchema.index({ product_name: 1 });
 
   const Food = mongoose.model("Food", FoodSchema, "foods");
 
   app.use(cors());
   app.use(express.json());
-  app.use(compression({ level: 9 })); 
+  app.use(compression({ level: 9 }));
 
   app.get("/foods", async (req, res) => {
+    const requestId = `${process.pid}-${Date.now()}`;
     try {
-      console.time("⏱️ Tiempo total del endpoint");
+      console.time(`⏱️ Tiempo total del endpoint-${requestId}`);
 
       const { name, page = 1, limit = 10 } = req.query;
-      const cacheKey = `foods:${name}:${page}:${limit}`;
 
-      if (!name) {
+      if (!name || !name.trim()) {
         console.warn("⚠️ Falta el parámetro 'name'");
-        return res.status(400).json({ error: "Debes proporcionar un nombre de producto" });
+        return res.status(400).json({ error: "Debes proporcionar un nombre de producto válido." });
       }
 
-      console.time("⏱️ Tiempo de cache en memoria");
+      const cacheKey = `foods:${name.toLowerCase().trim()}:${page}:${limit}`;
+
+      console.time(`⏱️ Tiempo de cache en memoria-${requestId}`);
       const cachedData = cache.get(cacheKey);
-      console.timeEnd("⏱️ Tiempo de cache en memoria");
+      console.timeEnd(`⏱️ Tiempo de cache en memoria-${requestId}`);
 
       if (cachedData) {
         console.log("📦 Datos recuperados desde caché");
-        console.timeEnd("⏱️ Tiempo total del endpoint");
+        console.timeEnd(`⏱️ Tiempo total del endpoint-${requestId}`);
         return res.json(cachedData);
       }
 
       const pageNumber = parseInt(page);
       const pageLimit = parseInt(limit);
 
-      console.time("⏱️ Tiempo de consulta MongoDB");
+      console.time(`⏱️ Tiempo de consulta MongoDB-${requestId}`);
 
-      // Optimización: paginación por cursor en lugar de skip
-      let query = { product_name: { $regex: name, $options: "i" } };
-      const foods = await Food.find(query, { product_name: 1, nutriments: 1 })  // Proyección limitada
-        .sort({ _id: 1 })
-        .limit(pageLimit + 1)  // +1 para verificar si hay más páginas
-        .lean();  // Eliminar conversiones de Mongoose
+      // Consulta utilizando agregación para ordenar los resultados
+      const foods = await Food.aggregate([
+        {
+          $match: {
+            product_name: { $regex: name, $options: "i" }
+          }
+        },
+        {
+          $addFields: {
+            priority: {
+              $cond: {
+                if: { $regexMatch: { input: "$product_name", regex: `^${name}`, options: "i" } },
+                then: 0,  // Prioridad alta si empieza con el término
+                else: 1   // Prioridad baja si solo contiene el término
+              }
+            }
+          }
+        },
+        {
+          $sort: { priority: 1, product_name: 1 }  // Ordena primero por prioridad, luego alfabéticamente
+        },
+        {
+          $project: { priority: 0 }  // Excluye el campo de prioridad del resultado final
+        },
+        {
+          $skip: (pageNumber - 1) * pageLimit
+        },
+        {
+          $limit: pageLimit
+        }
+      ]);
 
-      console.timeEnd("⏱️ Tiempo de consulta MongoDB");
+      console.timeEnd(`⏱️ Tiempo de consulta MongoDB-${requestId}`);
 
-      // Determinar si hay más páginas
-      const hasMorePages = foods.length > pageLimit;
-      if (hasMorePages) foods.pop();
+      const hasMorePages = foods.length === pageLimit;
 
       const response = {
         page: pageNumber,
         limit: pageLimit,
         hasMorePages,
         results: foods.map(food => {
-          // Optimización: transformar nutriments solo si existe energy_100g
           if (food.nutriments && food.nutriments.energy_100g) {
             food.nutriments.energy_100g = (food.nutriments.energy_100g / 4.184).toFixed(2);
           }
@@ -118,12 +140,12 @@ if (cluster.isMaster) {
         }),
       };
 
-      console.time("⏱️ Tiempo de guardado en cache");
+      console.time(`⏱️ Tiempo de guardado en cache-${requestId}`);
       cache.set(cacheKey, response);
-      console.timeEnd("⏱️ Tiempo de guardado en cache");
+      console.timeEnd(`⏱️ Tiempo de guardado en cache-${requestId}`);
 
       console.log("🔄 Respuesta enviada al cliente:", response);
-      console.timeEnd("⏱️ Tiempo total del endpoint");
+      console.timeEnd(`⏱️ Tiempo total del endpoint-${requestId}`);
       res.json(response);
     } catch (error) {
       console.error("❌ Error al buscar alimentos:", error);
