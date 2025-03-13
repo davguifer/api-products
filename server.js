@@ -33,11 +33,12 @@ if (cluster.isMaster) {
     process.exit(1);
   }
 
-  mongoose.connect(process.env.MONGO_URI, {
-    maxPoolSize: 50,
-  })
+  mongoose
+    .connect(process.env.MONGO_URI, {
+      maxPoolSize: 50,
+    })
     .then(() => console.log("✅ Conectado a MongoDB"))
-    .catch(err => {
+    .catch((err) => {
       console.error("❌ Error al conectar a MongoDB:", err);
       process.exit(1);
     });
@@ -47,7 +48,7 @@ if (cluster.isMaster) {
     allergens_tags: [String],
     product_name: String,
     nutriments: {
-      energy_100g: Number,
+      energy_100g: Number, // almacenado en kJ
       fat_100g: Number,
       carbohydrates_100g: Number,
       proteins_100g: Number,
@@ -68,14 +69,48 @@ if (cluster.isMaster) {
     try {
       console.time(`⏱️ Tiempo total del endpoint-${requestId}`);
 
-      const { name, page = 1, limit = 10 } = req.query;
+      const {
+        name,
+        // Suponemos que el usuario envía calorías en kcal
+        calorias_max,
+        proteinas_min,
+        grasas_min,
+        carbohidratos_min,
+        page = 1,
+        limit = 10,
+      } = req.query;
 
-      if (!name || !name.trim()) {
-        console.warn("⚠️ Falta el parámetro 'name'");
-        return res.status(400).json({ error: "Debes proporcionar un nombre de producto válido." });
+      const pageNumber = parseInt(page);
+      const pageLimit = parseInt(limit);
+
+      // Construir filtro de búsqueda dinámico
+      let filters = {};
+
+      if (name && name.trim()) {
+        filters.product_name = { $regex: name, $options: "i" };
       }
 
-      const cacheKey = `foods:${name.toLowerCase().trim()}:${page}:${limit}`;
+      // Convertir calorías de kcal a kJ para la consulta
+      if (calorias_max) {
+        filters["nutriments.energy_100g"] = {
+          $lte: parseFloat(calorias_max) * 4.184,
+        };
+      }
+
+      if (proteinas_min) {
+        filters["nutriments.proteins_100g"] = { $gte: parseFloat(proteinas_min) };
+      }
+
+      if (grasas_min) {
+        filters["nutriments.fat_100g"] = { $gte: parseFloat(grasas_min) };
+      }
+
+      if (carbohidratos_min) {
+        filters["nutriments.carbohydrates_100g"] = { $gte: parseFloat(carbohidratos_min) };
+      }
+
+      // Generar clave para el cache
+      const cacheKey = `foods:${JSON.stringify(filters)}:${page}:${limit}`;
 
       console.time(`⏱️ Tiempo de cache en memoria-${requestId}`);
       const cachedData = cache.get(cacheKey);
@@ -87,52 +122,48 @@ if (cluster.isMaster) {
         return res.json(cachedData);
       }
 
-      const pageNumber = parseInt(page);
-      const pageLimit = parseInt(limit);
-
       console.time(`⏱️ Tiempo de consulta MongoDB-${requestId}`);
 
-      // Consulta utilizando agregación para ordenar los resultados
-      const foods = await Food.aggregate([
-        {
-          $match: {
-            product_name: { $regex: name, $options: "i" }
-          }
-        },
+      // Pipeline de agregación
+      let aggregationPipeline = [
+        { $match: filters },
         {
           $addFields: {
-            priority: {
-              $cond: {
-                if: { $regexMatch: { input: "$product_name", regex: `^${name}`, options: "i" } },
-                then: 0,  // Prioridad alta si empieza con el término
-                else: 1   // Prioridad baja si solo contiene el término
-              }
-            }
-          }
+            priority: name
+              ? {
+                  $cond: {
+                    if: {
+                      $regexMatch: {
+                        input: "$product_name",
+                        regex: `^${name}`,
+                        options: "i",
+                      },
+                    },
+                    then: 0, // Prioridad alta si empieza con el término
+                    else: 1, // Prioridad baja si solo contiene el término
+                  },
+                }
+              : 1, // Si no hay búsqueda por nombre, mantener prioridad neutra
+          },
         },
-        {
-          $sort: { priority: 1, product_name: 1 }  // Ordena primero por prioridad, luego alfabéticamente
-        },
-        {
-          $project: { priority: 0 }  // Excluye el campo de prioridad del resultado final
-        },
-        {
-          $skip: (pageNumber - 1) * pageLimit
-        },
-        {
-          $limit: pageLimit
-        }
-      ]);
+        { $sort: { priority: 1, product_name: 1 } }, // Ordenar por prioridad y alfabéticamente
+        { $project: { priority: 0 } }, // Excluir el campo de prioridad
+        { $skip: (pageNumber - 1) * pageLimit },
+        { $limit: pageLimit },
+      ];
+
+      const foods = await Food.aggregate(aggregationPipeline);
 
       console.timeEnd(`⏱️ Tiempo de consulta MongoDB-${requestId}`);
 
       const hasMorePages = foods.length === pageLimit;
 
-      const response = {
+      // Convertir energía de kJ a kcal en la respuesta
+      const responseData = {
         page: pageNumber,
         limit: pageLimit,
         hasMorePages,
-        results: foods.map(food => {
+        results: foods.map((food) => {
           if (food.nutriments && food.nutriments.energy_100g) {
             food.nutriments.energy_100g = (food.nutriments.energy_100g / 4.184).toFixed(2);
           }
@@ -141,12 +172,12 @@ if (cluster.isMaster) {
       };
 
       console.time(`⏱️ Tiempo de guardado en cache-${requestId}`);
-      cache.set(cacheKey, response);
+      cache.set(cacheKey, responseData);
       console.timeEnd(`⏱️ Tiempo de guardado en cache-${requestId}`);
 
-      console.log("🔄 Respuesta enviada al cliente:", response);
+      console.log("🔄 Respuesta enviada al cliente:", responseData);
       console.timeEnd(`⏱️ Tiempo total del endpoint-${requestId}`);
-      res.json(response);
+      res.json(responseData);
     } catch (error) {
       console.error("❌ Error al buscar alimentos:", error);
       res.status(500).json({ error: "Error interno del servidor" });
